@@ -850,7 +850,7 @@ def section_members():
                     style = "color:#b00020; font-weight:600;"
                 med2.markdown(f"<div style='{style}'>Preostalo: {days_left} dana</div>", unsafe_allow_html=True)
 
-            if st.form_submit_button("Spremi izmjene")
+            if st.form_submit_button("Spremi izmjene"):
                 full_name = f"{data['first_name']} {data['last_name']}".strip() or data.get("full_name","")
                 data["full_name"] = full_name
                 gid = None
@@ -1098,7 +1098,7 @@ def section_competitions():
             [(f"{c.name} ({getattr(c,'alpha_3','').upper()})",
               getattr(c,'alpha_3','').lower(),
               getattr(c,'alpha_3','').upper())
-             for c in pycountry.countries],
+             for c in pycountry.countries],:
             key=lambda x: x[0]
         )
     except Exception:
@@ -1294,7 +1294,7 @@ try:
     import pycountry
     _COUNTRIES = sorted(
         [(f"{c.name} ({getattr(c, 'alpha_3', '').upper()})", getattr(c, "alpha_3", "").lower(), getattr(c, "alpha_3", "").upper())
-         for c in pycountry.countries],
+         for c in pycountry.countries],:
         key=lambda x: x[0]
     )
 except Exception:
