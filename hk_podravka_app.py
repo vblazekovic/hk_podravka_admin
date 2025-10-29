@@ -23,102 +23,6 @@ from typing import Optional, List, Tuple
 import pandas as pd
 import streamlit as st
 
-
-
-from io import BytesIO
-def download_df_as_excel_button(df, filename_base: str):
-    try:
-        buf = BytesIO(); df.to_excel(buf, index=False); buf.seek(0)
-        st.download_button("💾 Preuzmi Excel", data=buf.getvalue(), file_name=f"{filename_base}.xlsx")
-    except Exception as e:
-        st.info(f"Export nije uspio: {e}")
-
-
-
-from pathlib import Path as _Path
-def show_logo_safe(src: str | None, caption: str = "", width=None, use_column_width=True):
-    if not src:
-        st.warning("Logo nije dostupan.");
-        return
-    try:
-        p = _Path(str(src))
-        if p.exists() and p.is_file():
-            st.image(str(p), caption=caption, width=width, use_column_width=use_column_width); return
-        st.image(src, caption=caption, width=width, use_column_width=use_column_width)
-    except Exception as e:
-        st.warning(f"Logo nije moguće učitati ({e.__class__.__name__}).")
-        if caption: st.caption(caption)
-
-
-
-def table_exists(conn, name: str) -> bool:
-    try:
-        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,))
-        return cur.fetchone() is not None
-    except Exception:
-        return False
-
-
-
-def compute_competition_stats(conn, member_id: int | None = None):
-    try:
-        if member_id is None:
-            q = """
-                SELECT
-                    c.kind AS vrsta_natjecanja,
-                    COALESCE(c.custom_kind,'') AS podvrsta,
-                    c.date_from AS datum_od,
-                    c.date_to   AS datum_do,
-                    c.country   AS država,
-                    c.place     AS mjesto,
-                    c.style     AS stil,
-                    c.age_group AS uzrast,
-                    c.club_competitors AS nastupilo_hrvača,
-                    c.team_rank AS ekipni_plasman,
-                    COALESCE(SUM(cr.wins),0)   AS pobjeda,
-                    COALESCE(SUM(cr.losses),0) AS poraza,
-                    c.coaches_text AS treneri
-                FROM competitions c
-                LEFT JOIN competition_results cr ON cr.competition_id = c.id
-                GROUP BY c.id
-                ORDER BY c.date_from DESC
-            """
-            df = pd.read_sql_query(q, conn)
-        else:
-            q = """
-                SELECT
-                    c.kind AS vrsta_natjecanja,
-                    COALESCE(c.custom_kind,'') AS podvrsta,
-                    c.date_from AS datum_od,
-                    c.date_to   AS datum_do,
-                    c.country   AS država,
-                    c.place     AS mjesto,
-                    c.style     AS stil,
-                    c.age_group AS uzrast,
-                    c.club_competitors AS nastupilo_hrvača,
-                    c.team_rank AS ekipni_plasman,
-                    COALESCE(SUM(cr.wins),0)   AS pobjeda,
-                    COALESCE(SUM(cr.losses),0) AS poraza,
-                    c.coaches_text AS treneri,
-                    MAX(COALESCE(cr.placement,0)) AS plasman
-                FROM competitions c
-                LEFT JOIN competition_results cr ON cr.competition_id = c.id
-                WHERE cr.member_id = ?
-                GROUP BY c.id
-                ORDER BY c.date_from DESC
-            """
-            df = pd.read_sql_query(q, conn, params=(int(member_id),))
-        if not df.empty:
-            for col in ["datum_od","datum_do"]:
-                try:
-                    df[col] = pd.to_datetime(df[col]).dt.strftime("%d.%m.%Y.")
-                except Exception:
-                    pass
-        return df
-    except Exception as e:
-        st.error(f"Greška pri dohvaćanju statistike: {e}")
-        return pd.DataFrame()
-
 # Za ISO3 kodove
 try:
     import pycountry
@@ -348,7 +252,7 @@ def init_db():
         )
     """)
 
-
+    
     ensure_column("competition_results","age_group","TEXT")
 # Prisustvo: treneri (sesije) i članovi (dolazak)
     cur.execute("""
@@ -561,7 +465,7 @@ def section_club():
             logo_path = save_upload(logo_upload, "logo") if logo_upload else ""
             logo_src = logo_path or "https://hk-podravka.com/wp-content/uploads/2021/08/cropped-HK-Podravka-logo.png"
             if logo_src:
-                show_logo_safe(logo_src, caption=KLUB_NAZIV, use_column_width=True)
+                st.image(logo_src, caption=KLUB_NAZIV, use_column_width=True)
             else:
                 st.warning("Logo nije dostupan.")
             logo_path = save_upload(logo_upload, "logo") if logo_upload else ""
@@ -1071,137 +975,260 @@ def section_coaches():
 
 
 # ==========================
-
 def section_competitions():
-    page_header("Natjecanja i rezultati", "Unos natjecanja, datoteka, rezultata i pregled")
-    conn = get_conn()
+    page_header("Natjecanja i rezultati", "Unos natjecanja, datoteka, rezultata i pretraga")
 
+    # Definirane opcije
     KINDS = [
         "PRVENSTVO HRVATSKE","MEĐUNARODNI TURNIR","REPREZENTATIVNI NASTUP",
         "HRVAČKA LIGA ZA SENIORE","MEĐUNARODNA HRVAČKA LIGA ZA KADETE",
         "REGIONALNO PRVENSTVO","LIGA ZA DJEVOJČICE","OSTALO"
     ]
-    REP_SUB = ["PRVENSTVO EUROPE","PRVENSTVO SVIJETA","PRVENSTVO BALKANA","UWW TURNIR","OSTALO"]
-    STYLES = ["GR","FS","WW","BW"]
+    REP_SUB = ["PRVENSTVO EUROPE","PRVENSTVO SVIJETA","PRVENSTVO BALKANA","UWW TURNIR"]
+    STYLES = ["GR","FS","WW","BW","MODIFICIRANO"]
     AGES = ["POČETNICI","U11","U13","U15","U17","U20","U23","SENIORI"]
 
-    # Zemlje sa ISO/IOC kodovima
-    try:
-        import pycountry
-        COUNTRIES = sorted(
-            [(f"{c.name} ({getattr(c,'alpha_3','').upper()})",
-              getattr(c,'alpha_3','').lower(),
-              getattr(c,'alpha_3','').upper())
-             for c in pycountry.countries],
-            key=lambda x: x[0]
-        )
-    except Exception:
-        COUNTRIES = [("Croatia (CRO)","hrv","CRO"),("Serbia (SRB)","srb","SRB"),("Slovenia (SLO)","svn","SLO")]
+    conn = get_conn()
 
     with st.form("comp_form"):
-        kind = st.selectbox("Vrsta natjecanja", KINDS, key="comp_kind")
-        subtype = ""
-        if kind == "REPREZENTATIVNI NASTUP":
-            rep_choice = st.selectbox("Podvrsta reprezentativnog nastupa", REP_SUB, key="comp_rep_sub")
-            subtype = st.text_input("Upiši podvrstu reprezentativnog nastupa", key="comp_rep_custom") if rep_choice=="OSTALO" else rep_choice
-        elif kind == "OSTALO":
-            subtype = st.text_input("Upiši vrstu (ako 'OSTALO')", key="comp_kind_custom")
-
-        name = st.text_input("Ime natjecanja (ako postoji naziv)", key="comp_name")
+        kind = st.selectbox("Vrsta natjecanja", KINDS)
+        rep_sub = st.selectbox("Podvrsta reprezentativnog nastupa", REP_SUB, disabled=(kind!="REPREZENTATIVNI NASTUP"))
+        custom_kind = st.text_input("Upiši vrstu (ako 'OSTALO')", disabled=(kind!="OSTALO"))
+        name = st.text_input("Ime natjecanja (ako postoji naziv)")
         c1, c2 = st.columns(2)
-        date_from = c1.date_input("Datum od", value=date.today(), key="comp_date_from")
-        date_to = c2.date_input("Datum do (ako 1 dan, ostavi isti)", value=date.today(), key="comp_date_to")
+        date_from = c1.date_input("Datum od", value=date.today())
+        date_to = c2.date_input("Datum do (ako 1 dan, ostavi isti)", value=date.today())
+        place = st.text_input("Mjesto")
+        country = st.text_input("Država (puni naziv)")
+        auto_iso = iso3(country)
+        style = st.selectbox("Hrvački stil", STYLES)
+        age_group = st.selectbox("Uzrast", AGES)
+        c3, c4, c5 = st.columns(3)
+        team_rank = c3.text_input("Ekipni poredak (npr. 1., 5., 10.)")
+        club_competitors = c4.number_input("Broj naših natjecatelja", min_value=0, step=1)
+        total_competitors = c5.number_input("Ukupan broj natjecatelja", min_value=0, step=1)
+        c6, c7 = st.columns(2)
+        total_clubs = c6.number_input("Broj klubova", min_value=0, step=1)
+        total_countries = c7.number_input("Broj zemalja", min_value=0, step=1)
 
-        country_names = [n for n,_,__ in COUNTRIES]
-        sel_country = st.selectbox("Zemlja", country_names, key="comp_country")
-        iso_code = next(iso for n,iso,_ in COUNTRIES if n==sel_country)
-        ioc_code = next(ioc for n,_,ioc in COUNTRIES if n==sel_country)
-        st.text_input("ISO3 (auto)", iso_code, disabled=True, key="comp_iso")
-        st.text_input("IOC (auto)", ioc_code, disabled=True, key="comp_ioc")
+        # Treneri koji su vodili
+        coach_text = st.text_input("Trener(i) (odvoji zarezima)")
 
-        place = st.text_input("Mjesto", key="comp_place")
-        style = st.selectbox("Hrvački stil", STYLES, key="comp_style")
-        age_group = st.selectbox("Uzrast", AGES, key="comp_age")
+        # Opis i linkovi + upload
+        notes = st.text_area("Zapažanje trenera (za objave)")
+        bulletin_link = st.text_input("Link na bilten/rezultate")
+        results_link = st.text_input("Link na službene rezultate")
+        gallery_link = st.text_input("Link na objavu na webu (galerija)")
+        bulletin_file = st.file_uploader("Učitaj bilten (pdf)", type=["pdf"])
+        results_file = st.file_uploader("Učitaj rezultate (pdf/xlsx)", type=["pdf","xlsx"])
 
-        c3,c4,c5 = st.columns(3)
-        club_competitors = c3.number_input("Broj naših hrvača", min_value=0, step=1, key="comp_hrvaci")
-        team_rank = c4.text_input("Ekipni plasman", key="comp_team_rank")
+        # Slike
+        photos = st.file_uploader("Slike s natjecanja (više datoteka)", type=["jpg","jpeg","png"], accept_multiple_files=True)
 
-        auto_results = table_exists(conn, "competition_results")
-        if auto_results:
-            st.info("Broj pobjeda/poraza se računa automatski iz competition_results (ako podaci postoje).")
-            wins = 0
-            losses = 0
-        else:
-            c6, c7 = st.columns(2)
-            wins = c6.number_input("Ukupan broj pobjeda", min_value=0, step=1, key="comp_wins")
-            losses = c7.number_input("Ukupan broj poraza", min_value=0, step=1, key="comp_losses")
-
-        coaches = []
-        if table_exists(conn, "coaches"):
-            try:
-                coaches = [r[0] for r in conn.execute("SELECT full_name FROM coaches ORDER BY full_name").fetchall()]
-            except Exception:
-                coaches = []
-        mode = st.radio("Odabir trenera", ["Jedan","Više"], horizontal=True, key="comp_tr_mode")
-        if mode == "Jedan":
-            coach_text = st.selectbox("Trener", coaches if coaches else [""], key="comp_tr_one")
-        else:
-            coach_text = ", ".join(st.multiselect("Treneri", coaches, key="comp_tr_many"))
-
-        submit = st.form_submit_button("Spremi natjecanje", use_container_width=True)
+        submit = st.form_submit_button("Spremi natjecanje")
 
     if submit:
-        errors = []
-        if not kind: errors.append("Odaberi vrstu natjecanja.")
-        if not sel_country: errors.append("Odaberi državu.")
-        if not place: errors.append("Upiši mjesto.")
-        if date_to < date_from: errors.append("Datum 'do' ne može biti prije 'od'.")
-        if mode == "Jedan" and (not coach_text or coach_text.strip()==""): errors.append("Odaberi trenera.")
-        if mode == "Više" and (not coach_text or coach_text.strip()==""): errors.append("Odaberi barem jednog trenera.")
-        if errors:
-            for e in errors: st.error(e)
-        else:
-            conn.execute(
-                "INSERT INTO competitions (name,kind,custom_kind,date_from,date_to,country,country_code,place,style,age_group,club_competitors,team_rank,wins,losses,coaches_text) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, kind, subtype, str(date_from), str(date_to), sel_country, iso_code, place, style, age_group, int(club_competitors), team_rank, int(wins), int(losses), coach_text)
-            )
+        bull_p = save_upload(bulletin_file, "competitions/docs") if bulletin_file else ""
+        res_p = save_upload(results_file, "competitions/docs") if results_file else ""
+        conn.execute("""INSERT INTO competitions
+            (kind,custom_kind,name,date_from,date_to,place,style,age_group,country,country_code,
+             team_rank,club_competitors,total_competitors,total_clubs,total_countries,
+             coaches_text,notes,bulletin_link,results_link,gallery_link, bulletin_file, results_file)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (kind, rep_sub if kind=="REPREZENTATIVNI NASTUP" else custom_kind, name,
+             str(date_from), str(date_to), f"{place}, {country}", style, age_group, country, auto_iso,
+             team_rank, int(club_competitors), int(total_competitors), int(total_clubs), int(total_countries),
+             coach_text, notes, bulletin_link, results_link, gallery_link, bull_p, res_p))
+        comp_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        for ph in photos or []:
+            p = save_upload(ph, "competitions/photos")
+            conn.execute("INSERT INTO competition_photos (competition_id,filename,path,uploaded_at) VALUES (?,?,?,?)",
+                         (comp_id, ph.name, p, datetime.now().isoformat()))
+        conn.commit()
+        
+    st.markdown("---")
+    st.subheader("Unos rezultata sportaša")
+
+    comps = conn.execute("SELECT id, name, date_from FROM competitions ORDER BY date_from DESC").fetchall()
+    members = conn.execute("SELECT id, full_name FROM members ORDER BY full_name").fetchall()
+
+    if comps and members:
+        comp_sel = st.selectbox("Natjecanje", [f"{c[0]} – {c[1]} ({c[2]})" for c in comps], key="res_comp_sel")
+        mem_sel = st.multiselect("Odaberi sportaše koji su nastupili", [f"{m[0]} – {m[1]}" for m in members], key="res_mem_sel")
+
+        AGES_ALL = ["POČETNICI","U11","U13","U15","U17","U20","U23","SENIORI"]
+
+        with st.form("add_results2"):
+            for idx, ms in enumerate(mem_sel):
+                st.markdown(f"**#{idx+1} – {ms.split(' – ')[1]}**")
+                cA, cB = st.columns(2)
+                weight_cat = cA.text_input("Kategorija", key=f"res_k_{idx}")
+                age_g = cB.selectbox("Uzrast", AGES_ALL, key=f"res_age_{idx}")
+                c1, c2, c3 = st.columns(3)
+                bouts_total = c1.number_input("Ukupno borbi", min_value=0, step=1, key=f"res_bt_{idx}")
+                wins = c2.number_input("Pobjede", min_value=0, step=1, key=f"res_w_{idx}")
+                losses = c3.number_input("Porazi", min_value=0, step=1, key=f"res_l_{idx}")
+                placement = st.number_input("Plasman (1-100)", min_value=1, max_value=100, step=1, key=f"res_p_{idx}")
+
+                st.caption("Popis protivnika (unesi redove prema potrebi)")
+                opponents_df = st.data_editor(pd.DataFrame(columns=["Ime i prezime","Klub"]), use_container_width=True, hide_index=True, num_rows="dynamic", key=f"opp_tbl_{idx}")
+                note = st.text_area("Napomena trenera (opcionalno)", key=f"res_note_{idx}")
+                st.markdown("---")
+
+            submit_results = st.form_submit_button("Spremi rezultate")
+
+        if submit_results and mem_sel:
+            cid = int(comp_sel.split(" – ")[0])
+            for idx, ms in enumerate(mem_sel):
+                mid = int(ms.split(" – ")[0])
+                opp_key = f"opp_tbl_{idx}"
+                opp_df = st.session_state.get(opp_key)
+                try:
+                    opp_list = opp_df.to_dict(orient="records") if opp_df is not None else []
+                except Exception:
+                    opp_list = []
+
+                conn.execute("""INSERT INTO competition_results
+                                (competition_id,member_id,weight_category,age_group,bouts_total,wins,losses,placement,opponent_list,notes)
+                                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                             (cid, mid,
+                              st.session_state.get(f"res_k_{idx}", ""),
+                              st.session_state.get(f"res_age_{idx}", ""),
+                              int(st.session_state.get(f"res_bt_{idx}", 0) or 0),
+                              int(st.session_state.get(f"res_w_{idx}", 0) or 0),
+                              int(st.session_state.get(f"res_l_{idx}", 0) or 0),
+                              int(st.session_state.get(f"res_p_{idx}", 0) or 0),
+                              json.dumps(opp_list, ensure_ascii=False),
+                              st.session_state.get(f"res_note_{idx}", "")))
             conn.commit()
-            st.success("Natjecanje spremljeno.")
+            st.success("Rezultati su spremljeni u portfolije sportaša.")
 
-    # --- Sažetak ---
-    st.markdown("""---"""); st.subheader("Sažetak natjecanja")
-    view_mode = st.radio("Prikaz", ["Statistika kluba","Statistika sportaša"], horizontal=True, key="comp_view_mode")
-
-    if view_mode == "Statistika kluba":
-        f1,f2,f3,f4 = st.columns(4)
-        year = f1.text_input("Godina (npr. 2025)", key="sum_year")
-        style_f = f2.selectbox("Stil", ["Svi"]+STYLES, key="sum_style")
-        age_f = f3.selectbox("Uzrast", ["Svi"]+AGES, key="sum_age")
-        rep = f4.checkbox("Samo reprezentativni", key="sum_rep")
-
-        df = compute_competition_stats(conn, None)
-        if not df.empty:
-            if year: df = df[df["datum_od"].str.contains(year)]
-            if style_f!="Svi": df = df[df["stil"]==style_f]
-            if age_f!="Svi": df = df[df["uzrast"]==age_f]
-            if rep: df = df[df["vrsta_natjecanja"]=="REPREZENTATIVNI NASTUP"]
-        cols = ["vrsta_natjecanja","podvrsta","datum_od","datum_do","država","mjesto","stil","uzrast","nastupilo_hrvača","ekipni_plasman","pobjeda","poraza","treneri"]
-        st.dataframe(df[cols] if not df.empty else df, use_container_width=True)
-        if not df.empty: download_df_as_excel_button(df, "natjecanja_statistika")
     else:
-        members = conn.execute("SELECT id, full_name FROM members ORDER BY full_name").fetchall() if table_exists(conn,"members") else []
-        if members:
-            sel = st.selectbox("Sportaš", [f"{m[0]} – {m[1]}" for m in members], key="comp_member_sel")
-            mid = int(sel.split(" – ")[0])
-            df = compute_competition_stats(conn, mid)
-            yf = st.text_input("Godina (npr. 2025)", key="sum_year_ath")
-            if yf and not df.empty: df = df[df["datum_od"].str.contains(yf)]
-            cols = ["vrsta_natjecanja","podvrsta","datum_od","datum_do","država","mjesto","stil","uzrast","nastupilo_hrvača","ekipni_plasman","pobjeda","poraza","treneri","plasman"]
-            st.dataframe(df[cols] if not df.empty else df, use_container_width=True)
-            if not df.empty: download_df_as_excel_button(df, "natjecanja_sportas")
-        else:
-            st.info("Nema unesenih sportaša.")
+        st.info("Za unos rezultata potreban je barem jedan član i jedno natjecanje.")
+
+    st.markdown("---")
+    st.subheader("Pregled i pretraga rezultata")
+    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
+    f_kind = fcol1.text_input("Vrsta natjecanja (dio naziva)")
+    f_year = fcol2.text_input("Godina (npr. 2025)", key="comp_year")
+    f_cat  = fcol3.text_input("Kategorija (dio naziva)")
+    f_name = fcol4.text_input("Sportaš (dio imena)")
+
+    q = """
+        SELECT cr.id, m.full_name AS sportaš, c.name AS natjecanje, c.kind AS vrsta, c.date_from AS datum,
+               cr.weight_category AS kategorija, cr.age_group AS uzrast, cr.bouts_total AS borbi,
+               cr.wins AS pobjeda, cr.losses AS poraza, cr.notes AS napomena
+        FROM competition_results cr
+        JOIN members m ON m.id = cr.member_id
+        JOIN competitions c ON c.id = cr.competition_id
+        WHERE 1=1
+    """
+    params = []
+    if f_kind.strip(): q += " AND c.kind LIKE ?"; params.append(f"%{f_kind}%")
+    if f_year.strip(): q += " AND c.date_from LIKE ?"; params.append(f"{f_year}%")
+    if f_cat.strip():  q += " AND cr.weight_category LIKE ?"; params.append(f"%{f_cat}%")
+    if f_name.strip(): q += " AND m.full_name LIKE ?"; params.append(f"%{f_name}%")
+    q += " ORDER BY c.date_from DESC, m.full_name ASC"
+    res_df = pd.read_sql_query(q, conn, params=params)
+    st.dataframe(res_df, use_container_width=True)
+    st.success("Natjecanje spremljeno.")
+
+    # Dodavanje rezultata po sportašu
+    st.markdown("---")
+    st.subheader("Rezultati sportaša")
+    comps = conn.execute("SELECT id, name, date_from FROM competitions ORDER BY date_from DESC").fetchall()
+    members = conn.execute("SELECT id, full_name FROM members ORDER BY full_name").fetchall()
+    STYLES = ["GR","FS","WW","BW","MODIFICIRANO"]
+    if comps and members:
+        comp_sel = st.selectbox("Natjecanje", [f"{c[0]} – {c[1]} ({c[2]})" for c in comps])
+        mem_sel = st.multiselect("Odaberi sportaše (iz baze)", [f"{m[0]} – {m[1]}" for m in members])
+        with st.form("add_results"):
+            for idx, ms in enumerate(mem_sel):
+                st.markdown(f"**#{idx+1} – {ms}**")
+                weight = st.text_input("Kategorija", key=f"k_{idx}")
+                style2 = st.selectbox("Stil", STYLES, key=f"s_{idx}")
+                bouts_total = st.number_input("Ukupno borbi", min_value=0, step=1, key=f"bt_{idx}")
+                wins = st.number_input("Pobjede", min_value=0, step=1, key=f"w_{idx}")
+                losses = st.number_input("Porazi", min_value=0, step=1, key=f"l_{idx}")
+                placement = st.number_input("Plasman (1-100)", min_value=1, max_value=100, step=1, key=f"p_{idx}")
+                opponents_json = st.text_area("Protivnici (JSON lista objekata name/club/result)", key=f"o_{idx}")
+                note = st.text_area("Napomena", key=f"n_{idx}")
+            sres = st.form_submit_button("Spremi rezultate")
+        if sres:
+            cid = int(comp_sel.split(" – ")[0])
+            for idx, ms in enumerate(mem_sel):
+                mid = int(ms.split(" – ")[0])
+                conn.execute("""INSERT INTO competition_results
+                                (competition_id,member_id,weight_category,style,bouts_total,wins,losses,placement,opponent_list,notes)
+                                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                             (cid, mid, st.session_state[f"k_{idx}"], st.session_state[f"s_{idx}"],
+                              int(st.session_state[f"bt_{idx}"]), int(st.session_state[f"w_{idx}"]),
+                              int(st.session_state[f"l_{idx}"]), int(st.session_state[f"p_{idx}"]),
+                              st.session_state[f"o_{idx}"], st.session_state[f"n_{idx}"]))
+            conn.commit()
+            st.success("Rezultati spremljeni.")
+    else:
+        st.info("Za unos rezultata potreban je barem jedan član i jedno natjecanje.")
+
+    # Uvoz/izvoz rezultata iz Excela
+    upl = st.file_uploader("Učitaj rezultate (Excel po predlošku)", type=["xlsx"], key="upl_res")
+    if upl:
+        try:
+            df = pd.read_excel(upl).fillna("")
+            for _, r in df.iterrows():
+                cid = int(r.get("natjecanje_id","") or 0)
+                # pokušaj naći člana po imenu
+                mrow = conn.execute("SELECT id FROM members WHERE full_name=?", (r.get("clan(ime_prezime)",""),)).fetchone()
+                mid = mrow[0] if mrow else None
+                if cid and mid:
+                    conn.execute("""INSERT INTO competition_results
+                                    (competition_id,member_id,weight_category,style,bouts_total,wins,losses,placement,opponent_list,notes)
+                                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                                 (cid, mid, r.get("kategorija",""), r.get("stil",""),
+                                  int(r.get("ukupno_borbi",0) or 0), int(r.get("pobjede",0) or 0),
+                                  int(r.get("porazi",0) or 0), int(r.get("plasman(1-100)",0) or 0),
+                                  str(r.get("protivnici(JSON)","")), r.get("napomena","")))
+            conn.commit()
+            st.success("Rezultati uvezeni.")
+        except Exception as e:
+            st.error(f"Greška pri uvozu: {e}")
+    # Export svih rezultata
+    
+    res_all = pd.read_sql_query("""        SELECT cr.id, c.name AS natjecanje, c.date_from AS datum, m.full_name AS sportaš,
+               cr.weight_category AS kategorija, cr.style AS stil,
+               cr.bouts_total AS borbi, cr.wins AS pobjede, cr.losses AS porazi, cr.placement AS plasman
+        FROM competition_results cr
+        JOIN competitions c ON c.id=cr.competition_id
+        LEFT JOIN members m ON m.id=cr.member_id
+        ORDER BY c.date_from DESC
+    """, conn)
+    # formatiraj datum i redni broj za prikaz i export
+    if not res_all.empty:
+        try:
+            res_all['datum'] = pd.to_datetime(res_all['datum']).dt.strftime('%d.%m.%Y.')
+        except Exception:
+            pass
+        res_all.insert(0, 'R.br.', range(1, len(res_all)+1))
+    st.download_button("Skini sve rezultate (Excel)",
+                       data=excel_bytes_from_df(res_all, "Rezultati"),
+                       file_name="rezultati.xlsx")
+    # (Premješteno u section_competitions)
+    # Statistika za mjesec
+    st.markdown("---")
+    st.subheader("Statistika prisustva (mjesec)")
+    months = sorted(list(set([s[0][:7] for s in conn.execute("SELECT start_ts FROM sessions").fetchall() if s[0]])))
+    month = st.selectbox("Mjesec (YYYY-MM)", months if months else [])
+    if month:
+        s_count = conn.execute("SELECT COUNT(*), COALESCE(SUM((julianday(end_ts)-julianday(start_ts))*24*60),0) FROM sessions WHERE start_ts LIKE ?",
+                               (f"{month}%",)).fetchone()
+        st.write(f"- Broj treninga: **{int(s_count[0])}**")
+        st.write(f"- Ukupno minuta (treneri): **{int(s_count[1])}**")
+        a_count = conn.execute("SELECT COUNT(*), COALESCE(SUM(minutes),0) FROM attendance a JOIN sessions s ON s.id=a.session_id WHERE s.start_ts LIKE ?",
+                               (f"{month}%",)).fetchone()
+        st.write(f"- Prisustava (sportaši): **{int(a_count[0])}**")
+        st.write(f"- Ukupno minuta (sportaši): **{int(a_count[1])}**")
+
+    conn.close()
 
 
 # ==========================
